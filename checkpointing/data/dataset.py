@@ -1,11 +1,11 @@
 from generator.utils.tokenizer import (
-    CodeTokenizer, Vocabulary,
-    SOS_TOKEN, EOS_TOKEN, PAD_TOKEN
+    CodeTokenizer, Vocabulary
 )
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict
 import torch
 from torch.utils.data import Dataset, DataLoader
 import json
+import random
 
 class CodeTranslationDataset(Dataset):
     """
@@ -278,4 +278,19 @@ CLASS_NAMES = [
     "Validator", "Parser", "Builder", "Factory", "Wrapper",
 ]
  
- 
+def generate_synthetic_pairs(n: int = 300) -> List[Tuple[str, str]]:
+    """
+    Generate n synthetic Python-Java class pairs for rapid prototyping.
+    In a real project replace this with the TransCoder / XLCoST dataset.
+    """
+    pairs = []
+    templates = list(zip(PYTHON_TEMPLATES, JAVA_TEMPLATES))
+    for i in range(n):
+        py_tmpl, java_tmpl = random.choice(templates)
+        name = random.choice(CLASS_NAMES) + str(random.randint(1, 99))
+        pairs.append((
+            py_tmpl.format(name=name),
+            java_tmpl.format(name=name),
+        ))
+    print(f"[Data] Generated {n} synthetic Python→Java class pairs")
+    return pairs
