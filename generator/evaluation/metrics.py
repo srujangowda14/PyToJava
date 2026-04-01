@@ -112,3 +112,68 @@ def check_compilable(java_code: str, class_name: str = "Translated") -> bool:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         # javac not available — skip
         return None
+    
+class TranslationEvaluator:
+    """
+    Evaluate a batch of (hypothesis, reference) translation pairs.
+ 
+    Usage:
+        ev = TranslationEvaluator(tgt_tokenizer, tgt_vocab)
+        metrics = ev.evaluate(hypotheses_ids, references_ids)
+    """
+ 
+    def __init__(self, tgt_tokenizer, tgt_vocab, check_compile: bool = False):
+        self.tgt_tokenizer = tgt_tokenizer
+        self.tgt_vocab     = tgt_vocab
+        self.check_compile = check_compile
+ 
+    def evaluate(
+        self,
+        hyp_id_lists: List[List[int]],   # model output token id lists
+        ref_id_lists: List[List[int]],   # reference token id lists
+    ) -> dict:
+        bleus      = []
+        codebleus  = []
+        exacts     = []
+        compiles   = []
+ 
+        for hyp_ids, ref_ids in zip(hyp_id_lists, ref_id_lists):
+            hyp_tokens = self.tgt_vocab.decode(hyp_ids)
+            ref_tokens = self.tgt_vocab.decode(ref_ids)
+ 
+            bl = bleu_score(hyp_tokens, ref_tokens)
+            cb = code_bleu(hyp_tokens, ref_tokens)
+ 
+            hyp_code = self.tgt_tokenizer.detokenize(hyp_tokens)
+            ref_code = self.tgt_tokenizer.detokenize(ref_tokens)
+            em = exact_match(hyp_code, ref_code)
+ 
+            bleus.append(bl)
+            codebleus.append(cb)
+            exacts.append(em)
+ 
+            if self.check_compile:
+                ok = check_compilable(hyp_code)
+                if ok is not None:
+                    compiles.append(ok)
+ 
+        metrics = {
+            "bleu":       sum(bleus)     / len(bleus),
+            "code_bleu":  sum(codebleus) / len(codebleus),
+            "exact_match": sum(exacts)   / len(exacts),
+            "n_samples":  len(bleus),
+        }
+        if compiles:
+            metrics["compile_rate"] = sum(compiles) / len(compiles)
+ 
+        return metrics
+ 
+    def print_metrics(self, metrics: dict):
+        print("\n── Evaluation Results ──────────────────────────────")
+        print(f"  Samples      : {metrics['n_samples']}")
+        print(f"  BLEU-4       : {metrics['bleu']:.4f}")
+        print(f"  CodeBLEU     : {metrics['code_bleu']:.4f}")
+        print(f"  Exact Match  : {metrics['exact_match']:.2%}")
+        if "compile_rate" in metrics:
+            print(f"  Compile Rate : {metrics['compile_rate']:.2%}")
+        print("────────────────────────────────────────────────────\n")
