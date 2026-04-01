@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Dict
 import re
 
 PAD_TOKEN   = "<PAD>"
@@ -157,4 +157,58 @@ class CodeTokenizer:
             lines.append(" ".join(current))
  
         return "\n".join(lines)
+    
+class Vocabulary:
+    """
+    Builds and manages token ↔ index mappings for both source and target.
+    """
+ 
+    def __init__(self):
+        self.token2idx: Dict[str, int] = {}
+        self.idx2token: Dict[int, str] = {}
+        self._add_special_tokens()
+ 
+    def _add_special_tokens(self):
+        for tok in SPECIAL_TOKENS:
+            self._add(tok)
+ 
+    def _add(self, token: str):
+        if token not in self.token2idx:
+            idx = len(self.token2idx)
+            self.token2idx[token] = idx
+            self.idx2token[idx]   = token
+ 
+    def build(self, token_lists: List[List[str]], min_freq: int = 2):
+        """Build vocab from a list of token sequences with min frequency threshold."""
+        from collections import Counter
+        freq: Counter = Counter()
+        for seq in token_lists:
+            freq.update(seq)
+        for token, count in freq.items():
+            if count >= min_freq:
+                self._add(token)
+        print(f"[Vocab] Built vocabulary of size {len(self)} "
+              f"(min_freq={min_freq})")
+ 
+    def encode(self, tokens: List[str]) -> List[int]:
+        unk = self.token2idx[UNK_TOKEN]
+        return [self.token2idx.get(t, unk) for t in tokens]
+ 
+    def decode(self, indices: List[int]) -> List[str]:
+        return [self.idx2token.get(i, UNK_TOKEN) for i in indices]
+ 
+    def __len__(self):
+        return len(self.token2idx)
+ 
+    @property
+    def pad_idx(self) -> int:
+        return self.token2idx[PAD_TOKEN]
+ 
+    @property
+    def sos_idx(self) -> int:
+        return self.token2idx[SOS_TOKEN]
+ 
+    @property
+    def eos_idx(self) -> int:
+        return self.token2idx[EOS_TOKEN]
 
