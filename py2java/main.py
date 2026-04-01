@@ -7,6 +7,7 @@ from generator.evaluation.metrics import TranslationEvaluator
 from generator.utils.tokenizer   import CodeTokenizer
 import random
 import os
+import torch
 
 DEFAULT_CONFIG = {
     # Model
@@ -88,3 +89,44 @@ def run_train(args, config):
     with open(os.path.join(config["save_dir"], "vocabs.pkl"), "wb") as f:
         pickle.dump({"src": src_vocab, "tgt": tgt_vocab}, f)
     print("[Main] Vocabs saved.")
+
+def run_translate(args, config):
+    import pickle
+ 
+    vocab_path = os.path.join(os.path.dirname(args.checkpoint), "vocabs.pkl")
+    with open(vocab_path, "rb") as f:
+        vocabs = pickle.load(f)
+    src_vocab, tgt_vocab = vocabs["src"], vocabs["tgt"]
+ 
+    model = build_model(src_vocab, tgt_vocab, config)
+    ckpt  = torch.load(args.checkpoint, map_location="cpu")
+    model.load_state_dict(ckpt["model"])
+    model.eval()
+ 
+    # Read Python source
+    with open(args.input) as f:
+        py_code = f.read()
+ 
+    src_tok  = CodeTokenizer("python")
+    tgt_tok  = CodeTokenizer("java")
+ 
+    tokens   = src_tok.tokenize(py_code)[: config["max_src_len"]]
+    src_ids  = torch.tensor([src_vocab.encode(tokens)], dtype=torch.long)
+    src_mask = (src_ids == src_vocab.pad_idx)
+ 
+    if args.beam > 1:
+        tgt_ids = model.translate_beam(src_ids, src_mask, beam_size=args.beam)
+    else:
+        tgt_ids, _ = model.translate_greedy(src_ids, src_mask)
+ 
+    tgt_tokens = tgt_vocab.decode(tgt_ids)
+    java_code  = tgt_tok.detokenize(tgt_tokens)
+ 
+    print("\n── Generated Java ──────────────────────────────────")
+    print(java_code)
+    print("────────────────────────────────────────────────────")
+ 
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(java_code)
+        print(f"[Main] Saved to {args.output}")
