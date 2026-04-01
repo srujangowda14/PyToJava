@@ -5,6 +5,7 @@ from generator.utils.tokenizer import (
 from typing import List, Tuple, Dict, Optional
 import torch
 from torch.utils.data import Dataset
+import json
 
 class CodeTranslationDataset(Dataset):
     """
@@ -81,4 +82,34 @@ def collate_fn(
         "src_mask": src_mask,
         "tgt_mask": tgt_mask,
     }
+
+def load_jsonl(path: str) -> List[Tuple[str, str]]:
+    """Load JSONL file with {"python": ..., "java": ...} records."""
+    pairs = []
+    with open(path) as f:
+        for line in f:
+            obj = json.loads(line)
+            pairs.append((obj["python"], obj["java"]))
+    print(f"[Data] Loaded {len(pairs)} pairs from {path}")
+    return pairs
+ 
+ 
+def build_vocabs(
+    pairs: List[Tuple[str, str]],
+    min_freq: int = 2,
+) -> Tuple[Vocabulary, Vocabulary]:
+    """Build source (Python) and target (Java) vocabularies from parallel pairs."""
+    src_tok = CodeTokenizer("python")
+    tgt_tok = CodeTokenizer("java")
+ 
+    src_token_lists = [src_tok.tokenize(py)   for py, _  in pairs]
+    tgt_token_lists = [tgt_tok.tokenize(java) for _,  java in pairs]
+ 
+    src_vocab = Vocabulary()
+    tgt_vocab = Vocabulary()
+    src_vocab.build(src_token_lists, min_freq=min_freq)
+    tgt_vocab.build(tgt_token_lists, min_freq=min_freq)
+ 
+    return src_vocab, tgt_vocab
+ 
  
