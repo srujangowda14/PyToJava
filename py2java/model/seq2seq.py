@@ -112,3 +112,82 @@ class BahdanauAttention(nn.Module):
  
         return context, attn_weights
     
+class Decoder(nn.Module):
+    """
+    Unidirectional GRU decoder with input-feeding attention.
+ 
+    At each step:
+      1. Embed the previous token
+      2. Concatenate with previous context (input feeding)
+      3. Feed through GRU
+      4. Compute attention over encoder outputs
+      5. Project [hidden ⊕ context] → vocab logits
+    """
+ 
+    def __init__(
+        self,
+        vocab_size:   int,
+        embed_dim:    int,
+        hidden_dim:   int,
+        enc_out_dim:  int,   # 2*hidden_dim (bidirectional encoder)
+        n_layers:     int,
+        dropout:      float = 0.3,
+        pad_idx:      int   = 0,
+    ):
+        super().__init__()
+        self.hidden_dim  = hidden_dim
+        self.vocab_size  = vocab_size
+        self.n_layers    = n_layers
+ 
+        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=pad_idx)
+        self.dropout   = nn.Dropout(dropout)
+        self.attention = BahdanauAttention(hidden_dim, enc_out_dim)
+ 
+        # Input = embed + previous context
+        self.rnn = nn.GRU(
+            input_size  = embed_dim + enc_out_dim,
+            hidden_size = hidden_dim,
+            num_layers  = n_layers,
+            batch_first = True,
+            dropout     = dropout if n_layers > 1 else 0,
+        )
+ 
+        # Projection: [hidden ⊕ context] → vocab
+        self.fc_out = nn.Linear(hidden_dim + enc_out_dim, vocab_size)
+ 
+    def forward_step(
+        self,
+        token:           torch.Tensor,   # [B]       current token ids
+        hidden:          torch.Tensor,   # [n_layers, B, H]
+        encoder_outputs: torch.Tensor,   # [B, S, 2H]
+        src_mask:        torch.Tensor,   # [B, S]
+        prev_context:    torch.Tensor,   # [B, 2H]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Returns:
+            logits   : [B, vocab_size]
+            hidden   : [n_layers, B, H]
+            attn_w   : [B, src_len]
+        """
+        # top hidden layer for attention query
+        query = hidden[-1]                              # [B, H]
+ 
+        # Attention
+        context, attn_w = self.attention(query, encoder_outputs, src_mask)
+ 
+        # Embed + concat context (input feeding)
+        embedded = self.dropout(self.embedding(token.unsqueeze(1)))  # [B, 1, E]
+        rnn_input = torch.cat(
+            [embedded, context.unsqueeze(1)], dim=2
+        )                                               # [B, 1, E+2H]
+ 
+        output, hidden = self.rnn(rnn_input, hidden)   # output: [B, 1, H]
+        output = output.squeeze(1)                     # [B, H]
+ 
+        # Project
+        logits = self.fc_out(
+            torch.cat([output, context], dim=1)
+        )                                               # [B, vocab_size]
+ 
+        return logits, hidden, attn_w
+    
