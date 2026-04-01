@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from typing import Tuple
+from typing import Tuple, List
+import torch.nn.functional as F
 
 class Encoder(nn.Module):
     """
@@ -190,4 +191,208 @@ class Decoder(nn.Module):
         )                                               # [B, vocab_size]
  
         return logits, hidden, attn_w
+    
+class Seq2SeqTranslator(nn.Module):
+    """
+    End-to-end Python → Java seq2seq model.
+ 
+    Training  : teacher forcing with configurable ratio
+    Inference : greedy or beam search decoding
+    """
+ 
+    def __init__(
+        self,
+        src_vocab_size: int,
+        tgt_vocab_size: int,
+        embed_dim:      int   = 256,
+        hidden_dim:     int   = 512,
+        n_layers:       int   = 2,
+        dropout:        float = 0.3,
+        src_pad_idx:    int   = 0,
+        tgt_pad_idx:    int   = 0,
+        sos_idx:        int   = 2,
+        eos_idx:        int   = 3,
+    ):
+        super().__init__()
+ 
+        enc_out_dim = hidden_dim * 2   # bidirectional
+ 
+        self.encoder = Encoder(
+            vocab_size  = src_vocab_size,
+            embed_dim   = embed_dim,
+            hidden_dim  = hidden_dim,
+            n_layers    = n_layers,
+            dropout     = dropout,
+            pad_idx     = src_pad_idx,
+        )
+ 
+        self.decoder = Decoder(
+            vocab_size   = tgt_vocab_size,
+            embed_dim    = embed_dim,
+            hidden_dim   = hidden_dim,
+            enc_out_dim  = enc_out_dim,
+            n_layers     = n_layers,
+            dropout      = dropout,
+            pad_idx      = tgt_pad_idx,
+        )
+ 
+        self.src_pad_idx = src_pad_idx
+        self.tgt_pad_idx = tgt_pad_idx
+        self.sos_idx     = sos_idx
+        self.eos_idx     = eos_idx
+ 
+        self._init_weights()
+ 
+    def _init_weights(self):
+        for name, param in self.named_parameters():
+            if "weight" in name and param.dim() > 1:
+                nn.init.xavier_uniform_(param)
+            elif "bias" in name:
+                nn.init.zeros_(param)
+ 
+    # ── Training forward pass ─────────────────────────────────────────────────
+ 
+    def forward(
+        self,
+        src:              torch.Tensor,   # [B, src_len]
+        tgt:              torch.Tensor,   # [B, tgt_len]
+        src_mask:         torch.Tensor,   # [B, src_len]
+        teacher_force_ratio: float = 0.5,
+    ) -> torch.Tensor:
+        """
+        Returns logits: [B, tgt_len-1, tgt_vocab_size]
+        Target for loss: tgt[:, 1:]  (shifted by 1, excluding <SOS>)
+        """
+        batch_size  = src.size(0)
+        tgt_len     = tgt.size(1)
+        tgt_vocab   = self.decoder.vocab_size
+ 
+        # Encode
+        enc_outputs, hidden = self.encoder(src, src_mask)
+ 
+        # Initial decoder token = <SOS>
+        dec_input   = tgt[:, 0]                            # [B]
+        prev_context = torch.zeros(
+            batch_size, self.encoder.hidden_dim * 2,
+            device=src.device
+        )
+ 
+        all_logits = []
+ 
+        for t in range(1, tgt_len):
+            logits, hidden, _ = self.decoder.forward_step(
+                dec_input, hidden, enc_outputs, src_mask, prev_context
+            )
+            all_logits.append(logits.unsqueeze(1))         # [B, 1, V]
+ 
+            # Teacher forcing
+            if torch.rand(1).item() < teacher_force_ratio:
+                dec_input = tgt[:, t]
+            else:
+                dec_input = logits.argmax(dim=1)
+ 
+        return torch.cat(all_logits, dim=1)                # [B, tgt_len-1, V]
+ 
+    # ── Greedy decoding ───────────────────────────────────────────────────────
+ 
+    @torch.no_grad()
+    def translate_greedy(
+        self,
+        src:     torch.Tensor,   # [1, src_len]
+        src_mask: torch.Tensor,  # [1, src_len]
+        max_len: int = 768,
+    ) -> Tuple[List[int], torch.Tensor]:
+        """
+        Greedy decoding for a single example.
+        Returns:
+            token_ids   : list of generated token indices (excl. SOS/EOS)
+            attn_matrix : [steps, src_len] attention weights
+        """
+        self.eval()
+        enc_outputs, hidden = self.encoder(src, src_mask)
+ 
+        dec_input    = torch.tensor([self.sos_idx], device=src.device)
+        prev_context = torch.zeros(1, self.encoder.hidden_dim * 2, device=src.device)
+ 
+        generated    = []
+        attn_matrix  = []
+ 
+        for _ in range(max_len):
+            logits, hidden, attn_w = self.decoder.forward_step(
+                dec_input, hidden, enc_outputs, src_mask, prev_context
+            )
+            pred = logits.argmax(dim=1)   # [1]
+            token_id = pred.item()
+ 
+            if token_id == self.eos_idx:
+                break
+ 
+            generated.append(token_id)
+            attn_matrix.append(attn_w.squeeze(0).cpu())
+            dec_input = pred
+ 
+        attn_tensor = torch.stack(attn_matrix) if attn_matrix else torch.zeros(1, src.size(1))
+        return generated, attn_tensor
+ 
+    # ── Beam search decoding ──────────────────────────────────────────────────
+ 
+    @torch.no_grad()
+    def translate_beam(
+        self,
+        src:      torch.Tensor,
+        src_mask: torch.Tensor,
+        beam_size: int = 4,
+        max_len:   int = 768,
+    ) -> List[int]:
+        """
+        Beam search decoding. Returns best hypothesis token ids.
+        """
+        self.eval()
+        enc_outputs, hidden = self.encoder(src, src_mask)
+        prev_context = torch.zeros(1, self.encoder.hidden_dim * 2, device=src.device)
+ 
+        # Each beam: (log_prob, token_ids, hidden, prev_context)
+        beams = [(0.0, [self.sos_idx], hidden, prev_context)]
+        completed = []
+ 
+        for _ in range(max_len):
+            new_beams = []
+            for log_prob, tokens, h, ctx in beams:
+                if tokens[-1] == self.eos_idx:
+                    completed.append((log_prob, tokens[1:-1]))
+                    continue
+ 
+                dec_input = torch.tensor([tokens[-1]], device=src.device)
+                logits, new_h, _ = self.decoder.forward_step(
+                    dec_input, h, enc_outputs, src_mask, ctx
+                )
+                log_probs = F.log_softmax(logits, dim=1).squeeze(0)  # [V]
+                top_log_probs, top_ids = log_probs.topk(beam_size)
+ 
+                for lp, tid in zip(top_log_probs.tolist(), top_ids.tolist()):
+                    new_beams.append((
+                        log_prob + lp,
+                        tokens + [tid],
+                        new_h,
+                        ctx,
+                    ))
+ 
+            if not new_beams:
+                break
+ 
+            # Keep top beam_size beams
+            beams = sorted(new_beams, key=lambda x: x[0], reverse=True)[:beam_size]
+ 
+        # Add any unfinished beams
+        for log_prob, tokens, _, _ in beams:
+            completed.append((log_prob, tokens[1:]))
+ 
+        if not completed:
+            return []
+ 
+        best = max(completed, key=lambda x: x[0])
+        return best[1]
+ 
+    def count_parameters(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
     
