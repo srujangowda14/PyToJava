@@ -8,6 +8,7 @@ from generator.utils.tokenizer   import CodeTokenizer
 import random
 import os
 import torch
+import argparse
 
 DEFAULT_CONFIG = {
     # Model
@@ -168,4 +169,73 @@ def run_eval(args, config):
                                      check_compile=args.compile_check)
     metrics = evaluator.evaluate(hyp_ids_list, ref_ids_list)
     evaluator.print_metrics(metrics)
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Python → Java seq2seq translator")
+ 
+    p.add_argument("--mode", choices=["train", "translate", "eval"],
+                   default="train")
+ 
+    # Data
+    p.add_argument("--data",        type=str, help="Path to JSONL data file")
+    p.add_argument("--val",         type=str, help="Path to validation JSONL "
+                                                   "(overrides val_split)")
+    p.add_argument("--synthetic",   action="store_true",
+                   help="Use synthetic data for smoke-testing")
+    p.add_argument("--synthetic_n", type=int, default=500,
+                   help="Number of synthetic pairs to generate")
+ 
+    # Model / training
+    p.add_argument("--epochs",      type=int,   default=DEFAULT_CONFIG["n_epochs"])
+    p.add_argument("--batch_size",  type=int,   default=DEFAULT_CONFIG["batch_size"])
+    p.add_argument("--hidden_dim",  type=int,   default=DEFAULT_CONFIG["hidden_dim"])
+    p.add_argument("--embed_dim",   type=int,   default=DEFAULT_CONFIG["embed_dim"])
+    p.add_argument("--n_layers",    type=int,   default=DEFAULT_CONFIG["n_layers"])
+    p.add_argument("--lr",          type=float, default=DEFAULT_CONFIG["lr"])
+    p.add_argument("--dropout",     type=float, default=DEFAULT_CONFIG["dropout"])
+ 
+    # Checkpointing
+    p.add_argument("--checkpoint",  type=str, help="Path to checkpoint (.pt)")
+    p.add_argument("--resume",      type=str, help="Resume training from checkpoint")
+    p.add_argument("--save_dir",    type=str, default="checkpoints")
+ 
+    # Translation
+    p.add_argument("--input",       type=str, help="Python source file to translate")
+    p.add_argument("--output",      type=str, help="Output Java file path")
+    p.add_argument("--beam",        type=int, default=1,
+                   help="Beam size (1 = greedy)")
+ 
+    # Evaluation
+    p.add_argument("--compile_check", action="store_true",
+                   help="Run javac on translated output (requires javac on PATH)")
+ 
+    return p.parse_args()
+ 
+ 
+if __name__ == "__main__":
+    args = parse_args()
+ 
+    # Merge CLI args into config
+    config = {**DEFAULT_CONFIG}
+    config.update({
+        "n_epochs":  args.epochs,
+        "batch_size": args.batch_size,
+        "hidden_dim": args.hidden_dim,
+        "embed_dim":  args.embed_dim,
+        "n_layers":   args.n_layers,
+        "lr":         args.lr,
+        "dropout":    args.dropout,
+        "save_dir":   args.save_dir,
+    })
+ 
+    if args.mode == "train":
+        run_train(args, config)
+    elif args.mode == "translate":
+        assert args.input and args.checkpoint, \
+            "--input and --checkpoint required for translate mode"
+        run_translate(args, config)
+    elif args.mode == "eval":
+        assert args.data and args.checkpoint, \
+            "--data and --checkpoint required for eval mode"
+        run_eval(args, config)
  
