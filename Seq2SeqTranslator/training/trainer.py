@@ -36,3 +36,27 @@ class LabelSmoothingLoss(nn.Module):
         # Average over non-padding tokens
         non_pad = (~mask).sum()
         return loss.sum() / non_pad.clamp(min=1)
+    
+class WarmupScheduler:
+    """
+    Linear warm-up for `warmup_steps` then delegates to base scheduler.
+    """
+ 
+    def __init__(self, optimizer, warmup_steps: int, base_scheduler):
+        self.optimizer      = optimizer
+        self.warmup_steps   = warmup_steps
+        self.base_scheduler = base_scheduler
+        self.step_count     = 0
+        self._base_lrs      = [g["lr"] for g in optimizer.param_groups]
+ 
+    def step(self):
+        self.step_count += 1
+        if self.step_count <= self.warmup_steps:
+            scale = self.step_count / max(1, self.warmup_steps)
+            for pg, base_lr in zip(self.optimizer.param_groups, self._base_lrs):
+                pg["lr"] = base_lr * scale
+        else:
+            self.base_scheduler.step()
+ 
+    def get_last_lr(self):
+        return [pg["lr"] for pg in self.optimizer.param_groups]
