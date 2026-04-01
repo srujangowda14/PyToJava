@@ -31,3 +31,15 @@ convert(BASE + "val-Java-Python-tok.py",
 convert(BASE + "test-Java-Python-tok.py",
         BASE + "test-Java-Python-tok.java",
         "test.jsonl")
+
+# In prepare_data.py or a new script
+import json, random
+
+with open("train.jsonl") as f:
+    pairs = f.readlines()
+
+random.shuffle(pairs)
+subset = pairs[:10000]   # 10K is plenty to start
+
+with open("train_small.jsonl", "w") as f:
+    f.writelines(subset)

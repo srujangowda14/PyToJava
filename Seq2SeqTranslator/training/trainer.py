@@ -8,42 +8,36 @@ from torch.utils.data import DataLoader
 from torch.optim import Adam
 from typing import Dict, Optional
 import json
+import torch.nn.functional as F
 
 class LabelSmoothingLoss(nn.Module):
     """
-    Cross-entropy with label smoothing.
-    Improves generalisation by preventing the model from being overconfident.
- 
-    smoothing=0.1 is the standard choice (used in the original Transformer paper).
+    Memory-efficient cross-entropy with label smoothing.
+    logits  : [B*T, V]
+    targets : [B*T]
     """
- 
     def __init__(self, vocab_size: int, pad_idx: int, smoothing: float = 0.1):
         super().__init__()
         self.vocab_size = vocab_size
-        self.pad_idx    = pad_idx
-        self.smoothing  = smoothing
+        self.pad_idx = pad_idx
+        self.smoothing = smoothing
         self.confidence = 1.0 - smoothing
- 
+
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """
-        logits  : [B * T, V]
-        targets : [B * T]
-        """
-        V = self.vocab_size
-        # Smooth target distribution
-        with torch.no_grad():
-            smooth_dist = torch.full_like(logits, self.smoothing / (V - 2))
-            smooth_dist[:, self.pad_idx] = 0
-            smooth_dist.scatter_(1, targets.unsqueeze(1), self.confidence)
-            mask = (targets == self.pad_idx)
-            smooth_dist[mask] = 0
- 
-        log_probs = torch.log_softmax(logits, dim=1)
-        loss = -(smooth_dist * log_probs).sum(dim=1)
- 
-        # Average over non-padding tokens
-        non_pad = (~mask).sum()
-        return loss.sum() / non_pad.clamp(min=1)
+        log_probs = F.log_softmax(logits, dim=1)   # [N, V]
+
+        mask = targets != self.pad_idx
+        if mask.sum() == 0:
+            return logits.new_tensor(0.0)
+
+        log_probs = log_probs[mask]
+        targets = targets[mask]
+
+        nll_loss = -log_probs.gather(dim=1, index=targets.unsqueeze(1)).squeeze(1)
+        smooth_loss = -log_probs.mean(dim=1)
+
+        loss = self.confidence * nll_loss + self.smoothing * smooth_loss
+        return loss.mean()
     
 class WarmupScheduler:
     """

@@ -1,7 +1,7 @@
-from model.seq2seq import Seq2SeqTranslator
-from checkpointing.data.dataset      import (load_jsonl, build_vocabs, get_dataloaders,
+from py2java.model.seq2seq import Seq2SeqTranslator
+from checkpointing.data.dataset  import (load_jsonl, build_vocabs, get_dataloaders,
                                 generate_synthetic_pairs)
-from model.seq2seq     import Seq2SeqTranslator
+from py2java.model.seq2seq import Seq2SeqTranslator
 from Seq2SeqTranslator.training.trainer  import Trainer
 from generator.evaluation.metrics import TranslationEvaluator
 from generator.utils.tokenizer   import CodeTokenizer
@@ -134,39 +134,66 @@ def run_translate(args, config):
 
 
 def run_eval(args, config):
+    import os
     import pickle
- 
+    import torch
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[Eval] Device: {device}")
+
     vocab_path = os.path.join(os.path.dirname(args.checkpoint), "vocabs.pkl")
     with open(vocab_path, "rb") as f:
         vocabs = pickle.load(f)
     src_vocab, tgt_vocab = vocabs["src"], vocabs["tgt"]
- 
-    model = build_model(src_vocab, tgt_vocab, config)
-    ckpt  = torch.load(args.checkpoint, map_location="cpu")
+
+    model = build_model(src_vocab, tgt_vocab, config).to(device)
+    ckpt = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(ckpt["model"])
     model.eval()
- 
-    pairs   = load_jsonl(args.data)
+
+    pairs = load_jsonl(args.data)
+    print(f"[Eval] Loaded {len(pairs)} pairs from {args.data}")
+
     src_tok = CodeTokenizer("python")
     tgt_tok = CodeTokenizer("java")
- 
+
     hyp_ids_list = []
     ref_ids_list = []
- 
-    for py_code, java_code in pairs:
-        src_tokens = src_tok.tokenize(py_code)[: config["max_src_len"]]
-        ref_tokens = tgt_tok.tokenize(java_code)[: config["max_tgt_len"]]
- 
-        src_ids  = torch.tensor([src_vocab.encode(src_tokens)], dtype=torch.long)
-        src_mask = (src_ids == src_vocab.pad_idx)
- 
-        pred_ids, _ = model.translate_greedy(src_ids, src_mask,
-                                             max_len=config["max_tgt_len"])
-        hyp_ids_list.append(pred_ids)
-        ref_ids_list.append(tgt_vocab.encode(ref_tokens))
- 
-    evaluator = TranslationEvaluator(tgt_tok, tgt_vocab,
-                                     check_compile=args.compile_check)
+
+    with torch.no_grad():
+        for i, (py_code, java_code) in enumerate(pairs, 1):
+            src_tokens = src_tok.tokenize(py_code)[: config["max_src_len"]]
+            ref_tokens = tgt_tok.tokenize(java_code)[: config["max_tgt_len"]]
+
+            src_ids = torch.tensor(
+                [src_vocab.encode(src_tokens)],
+                dtype=torch.long,
+                device=device
+            )
+            src_mask = (src_ids == src_vocab.pad_idx)
+
+            pred_ids, _ = model.translate_greedy(
+                src_ids,
+                src_mask,
+                max_len=config["max_tgt_len"]
+            )
+
+            if isinstance(pred_ids, torch.Tensor):
+                pred_ids = pred_ids.squeeze(0).detach().cpu().tolist()
+            elif len(pred_ids) > 0 and isinstance(pred_ids[0], torch.Tensor):
+                pred_ids = [x.item() for x in pred_ids]
+
+            hyp_ids_list.append(pred_ids)
+            ref_ids_list.append(tgt_vocab.encode(ref_tokens))
+
+            if i % 100 == 0:
+                print(f"[Eval] Processed {i}/{len(pairs)}")
+
+    evaluator = TranslationEvaluator(
+        tgt_tok,
+        tgt_vocab,
+        check_compile=args.compile_check
+    )
     metrics = evaluator.evaluate(hyp_ids_list, ref_ids_list)
     evaluator.print_metrics(metrics)
 
