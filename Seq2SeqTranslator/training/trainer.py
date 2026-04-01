@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 import math
 import time
+import os
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import DataLoader
+from torch.optim import Adam
 
 class LabelSmoothingLoss(nn.Module):
     """
@@ -63,7 +67,106 @@ class WarmupScheduler:
     def get_last_lr(self):
         return [pg["lr"] for pg in self.optimizer.param_groups]
     
-def train(self, n_epochs: int):
+class Trainer:
+    """
+    Encapsulates the full training / validation loop.
+ 
+    Usage:
+        trainer = Trainer(model, train_dl, val_dl, tgt_vocab, config)
+        trainer.train(n_epochs=30)
+    """
+ 
+    def __init__(
+        self,
+        model:      nn.Module,
+        train_dl:   DataLoader,
+        val_dl:     DataLoader,
+        tgt_vocab,
+        config:     Dict,
+        device:     Optional[torch.device] = None,
+    ):
+        self.model    = model
+        self.train_dl = train_dl
+        self.val_dl   = val_dl
+        self.config   = config
+        self.device   = device or torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+        self.model.to(self.device)
+ 
+        # Loss
+        self.criterion = LabelSmoothingLoss(
+            vocab_size = len(tgt_vocab),
+            pad_idx    = tgt_vocab.pad_idx,
+            smoothing  = config.get("label_smoothing", 0.1),
+        )
+ 
+        # Optimizer
+        self.optimizer = Adam(
+            model.parameters(),
+            lr           = config.get("lr", 1e-3),
+            weight_decay = config.get("weight_decay", 1e-5),
+        )
+ 
+        # LR schedule: warm-up + cosine annealing
+        base_sched = CosineAnnealingLR(
+            self.optimizer,
+            T_max = config.get("n_epochs", 30),
+            eta_min = 1e-6,
+        )
+        self.scheduler = WarmupScheduler(
+            self.optimizer,
+            warmup_steps  = config.get("warmup_steps", 200),
+            base_scheduler = base_sched,
+        )
+ 
+        self.clip         = config.get("grad_clip", 1.0)
+        self.save_dir     = config.get("save_dir", "checkpoints")
+        self.best_val_loss = float("inf")
+        self.history      = {"train_loss": [], "val_loss": []}
+ 
+        os.makedirs(self.save_dir, exist_ok=True)
+ 
+    # ── One epoch ─────────────────────────────────────────────────────────────
+ 
+    def _run_epoch(self, dl: DataLoader, train: bool, tf_ratio: float) -> float:
+        self.model.train(train)
+        total_loss = 0.0
+        n_batches  = 0
+ 
+        ctx = torch.enable_grad() if train else torch.no_grad()
+        with ctx:
+            for batch in dl:
+                src      = batch["src"].to(self.device)
+                tgt      = batch["tgt"].to(self.device)
+                src_mask = batch["src_mask"].to(self.device)
+ 
+                logits = self.model(
+                    src, tgt, src_mask,
+                    teacher_force_ratio = tf_ratio if train else 0.0,
+                )
+                # logits: [B, T-1, V]  |  target: tgt[:, 1:]
+                B, T, V = logits.shape
+                loss = self.criterion(
+                    logits.reshape(B * T, V),
+                    tgt[:, 1:].reshape(B * T),
+                )
+ 
+                if train:
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(self.model.parameters(), self.clip)
+                    self.optimizer.step()
+                    self.scheduler.step()
+ 
+                total_loss += loss.item()
+                n_batches  += 1
+ 
+        return total_loss / max(n_batches, 1)
+ 
+    # ── Full training run ─────────────────────────────────────────────────────
+ 
+    def train(self, n_epochs: int):
         print(f"\n[Trainer] Device: {self.device}")
         print(f"[Trainer] Model parameters: {self.model.count_parameters():,}\n")
  
