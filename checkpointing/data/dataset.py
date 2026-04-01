@@ -54,4 +54,31 @@ class CodeTranslationDataset(Dataset):
             "src": torch.tensor(src_ids, dtype=torch.long),
             "tgt": torch.tensor(tgt_ids, dtype=torch.long),
         }
+    
+def collate_fn(
+    batch: List[Dict[str, torch.Tensor]],
+    src_pad_idx: int,
+    tgt_pad_idx: int,
+) -> Dict[str, torch.Tensor]:
+    """Pad a batch of variable-length sequences to the same length."""
+    src_seqs = [item["src"] for item in batch]
+    tgt_seqs = [item["tgt"] for item in batch]
+ 
+    src_padded = torch.nn.utils.rnn.pad_sequence(
+        src_seqs, batch_first=True, padding_value=src_pad_idx
+    )
+    tgt_padded = torch.nn.utils.rnn.pad_sequence(
+        tgt_seqs, batch_first=True, padding_value=tgt_pad_idx
+    )
+ 
+    # Boolean padding masks  (True = ignore this position)
+    src_mask = (src_padded == src_pad_idx)
+    tgt_mask = (tgt_padded == tgt_pad_idx)
+ 
+    return {
+        "src":      src_padded,
+        "tgt":      tgt_padded,
+        "src_mask": src_mask,
+        "tgt_mask": tgt_mask,
+    }
  
