@@ -6,6 +6,8 @@ import os
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from torch.optim import Adam
+from typing import Dict, Optional
+import json
 
 class LabelSmoothingLoss(nn.Module):
     """
@@ -205,3 +207,27 @@ class Trainer:
  
         self._save_history()
         print(f"\n[Trainer] Training complete. Best val loss: {self.best_val_loss:.4f}")
+
+    def _save_checkpoint(self, epoch: int, val_loss: float, tag: str = "ckpt"):
+        path = os.path.join(self.save_dir, f"model_{tag}.pt")
+        torch.save({
+            "epoch":      epoch,
+            "model":      self.model.state_dict(),
+            "optimizer":  self.optimizer.state_dict(),
+            "val_loss":   val_loss,
+            "config":     self.config,
+        }, path)
+        print(f"  ✓ Saved checkpoint → {path}")
+ 
+    def load_checkpoint(self, path: str):
+        ckpt = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(ckpt["model"])
+        self.optimizer.load_state_dict(ckpt["optimizer"])
+        self.best_val_loss = ckpt["val_loss"]
+        print(f"[Trainer] Resumed from {path}  (epoch {ckpt['epoch']}, "
+              f"val_loss {ckpt['val_loss']:.4f})")
+ 
+    def _save_history(self):
+        path = os.path.join(self.save_dir, "history.json")
+        with open(path, "w") as f:
+            json.dump(self.history, f, indent=2)
