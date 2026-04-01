@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+import math
+import time
 
 class LabelSmoothingLoss(nn.Module):
     """
@@ -60,3 +62,43 @@ class WarmupScheduler:
  
     def get_last_lr(self):
         return [pg["lr"] for pg in self.optimizer.param_groups]
+    
+def train(self, n_epochs: int):
+        print(f"\n[Trainer] Device: {self.device}")
+        print(f"[Trainer] Model parameters: {self.model.count_parameters():,}\n")
+ 
+        for epoch in range(1, n_epochs + 1):
+            # Teacher forcing ratio: linearly decay 1.0 → 0.5 over training
+            tf_ratio = max(0.5, 1.0 - (epoch / n_epochs) * 0.5)
+ 
+            t0 = time.time()
+            train_loss = self._run_epoch(self.train_dl, train=True,  tf_ratio=tf_ratio)
+            val_loss   = self._run_epoch(self.val_dl,   train=False, tf_ratio=0.0)
+            elapsed    = time.time() - t0
+ 
+            train_ppl = math.exp(min(train_loss, 20))
+            val_ppl   = math.exp(min(val_loss,   20))
+            lr        = self.scheduler.get_last_lr()[0]
+ 
+            print(
+                f"Epoch {epoch:03d}/{n_epochs} | "
+                f"Train Loss {train_loss:.4f} (PPL {train_ppl:.1f}) | "
+                f"Val Loss {val_loss:.4f} (PPL {val_ppl:.1f}) | "
+                f"LR {lr:.2e} | TF {tf_ratio:.2f} | "
+                f"Time {elapsed:.1f}s"
+            )
+ 
+            self.history["train_loss"].append(train_loss)
+            self.history["val_loss"].append(val_loss)
+ 
+            # Save best checkpoint
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+                self._save_checkpoint(epoch, val_loss, tag="best")
+ 
+            # Periodic checkpoint every 5 epochs
+            if epoch % 5 == 0:
+                self._save_checkpoint(epoch, val_loss, tag=f"epoch{epoch}")
+ 
+        self._save_history()
+        print(f"\n[Trainer] Training complete. Best val loss: {self.best_val_loss:.4f}")
