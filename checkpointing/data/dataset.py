@@ -4,7 +4,7 @@ from generator.utils.tokenizer import (
 )
 from typing import List, Tuple, Dict, Optional
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 import json
 
 class CodeTranslationDataset(Dataset):
@@ -111,5 +111,34 @@ def build_vocabs(
     tgt_vocab.build(tgt_token_lists, min_freq=min_freq)
  
     return src_vocab, tgt_vocab
+
+def get_dataloaders(
+    train_pairs: List[Tuple[str, str]],
+    val_pairs:   List[Tuple[str, str]],
+    src_vocab:   Vocabulary,
+    tgt_vocab:   Vocabulary,
+    batch_size:  int = 16,
+    num_workers: int = 0,
+) -> Tuple[DataLoader, DataLoader]:
+ 
+    src_tok = CodeTokenizer("python")
+    tgt_tok = CodeTokenizer("java")
+ 
+    from functools import partial
+    _collate = partial(
+        collate_fn,
+        src_pad_idx=src_vocab.pad_idx,
+        tgt_pad_idx=tgt_vocab.pad_idx,
+    )
+ 
+    train_ds = CodeTranslationDataset(train_pairs, src_vocab, tgt_vocab, src_tok, tgt_tok)
+    val_ds   = CodeTranslationDataset(val_pairs,   src_vocab, tgt_vocab, src_tok, tgt_tok)
+ 
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                          collate_fn=_collate, num_workers=num_workers)
+    val_dl   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
+                          collate_fn=_collate, num_workers=num_workers)
+ 
+    return train_dl, val_dl
  
  
