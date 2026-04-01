@@ -140,5 +140,142 @@ def get_dataloaders(
                           collate_fn=_collate, num_workers=num_workers)
  
     return train_dl, val_dl
+
+PYTHON_TEMPLATES = [
+    """\
+class {name}:
+    def __init__(self, value):
+        self.value = value
+ 
+    def get_value(self):
+        return self.value
+ 
+    def set_value(self, value):
+        self.value = value
+ 
+    def __str__(self):
+        return str(self.value)
+""",
+    """\
+class {name}:
+    def __init__(self, items):
+        self.items = items
+ 
+    def add(self, item):
+        self.items.append(item)
+ 
+    def remove(self, item):
+        self.items.remove(item)
+ 
+    def size(self):
+        return len(self.items)
+ 
+    def contains(self, item):
+        return item in self.items
+""",
+    """\
+class {name}:
+    count = 0
+ 
+    def __init__(self, name, age):
+        self.name = name
+        self.age = age
+        {name}.count += 1
+ 
+    def greet(self):
+        return "Hello, " + self.name
+ 
+    def is_adult(self):
+        return self.age >= 18
+ 
+    @staticmethod
+    def get_count():
+        return {name}.count
+""",
+]
+ 
+JAVA_TEMPLATES = [
+    """\
+public class {name} {{
+    private int value;
+ 
+    public {name}(int value) {{
+        this.value = value;
+    }}
+ 
+    public int getValue() {{
+        return value;
+    }}
+ 
+    public void setValue(int value) {{
+        this.value = value;
+    }}
+ 
+    @Override
+    public String toString() {{
+        return String.valueOf(value);
+    }}
+}}
+""",
+    """\
+import java.util.ArrayList;
+import java.util.List;
+ 
+public class {name} {{
+    private List<Object> items;
+ 
+    public {name}(List<Object> items) {{
+        this.items = new ArrayList<>(items);
+    }}
+ 
+    public void add(Object item) {{
+        items.add(item);
+    }}
+ 
+    public void remove(Object item) {{
+        items.remove(item);
+    }}
+ 
+    public int size() {{
+        return items.size();
+    }}
+ 
+    public boolean contains(Object item) {{
+        return items.contains(item);
+    }}
+}}
+""",
+    """\
+public class {name} {{
+    private static int count = 0;
+    private String name;
+    private int age;
+ 
+    public {name}(String name, int age) {{
+        this.name = name;
+        this.age = age;
+        {name}.count++;
+    }}
+ 
+    public String greet() {{
+        return "Hello, " + name;
+    }}
+ 
+    public boolean isAdult() {{
+        return age >= 18;
+    }}
+ 
+    public static int getCount() {{
+        return count;
+    }}
+}}
+""",
+]
+
+CLASS_NAMES = [
+    "Counter", "Container", "Person", "Node", "Stack",
+    "Queue", "Calculator", "Manager", "Handler", "Processor",
+    "Validator", "Parser", "Builder", "Factory", "Wrapper",
+]
  
  
