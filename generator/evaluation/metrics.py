@@ -42,3 +42,36 @@ def bleu_score(
         log_bleu += math.log(precision)
  
     return bp * math.exp(log_bleu / max_n)
+
+JAVA_STRUCTURAL_KEYWORDS = {
+    "class", "public", "private", "protected", "static", "final",
+    "void", "return", "new", "this", "super", "extends", "implements",
+    "if", "else", "for", "while", "try", "catch", "throws",
+    "int", "long", "double", "float", "boolean", "String",
+    "List", "Map", "ArrayList", "HashMap", "Override",
+}
+ 
+def _keyword_overlap(hyp_tokens: List[str], ref_tokens: List[str]) -> float:
+    """Jaccard similarity on Java structural keyword sets."""
+    hyp_kw = {t for t in hyp_tokens if t in JAVA_STRUCTURAL_KEYWORDS}
+    ref_kw = {t for t in ref_tokens if t in JAVA_STRUCTURAL_KEYWORDS}
+    if not ref_kw:
+        return 1.0 if not hyp_kw else 0.0
+    return len(hyp_kw & ref_kw) / len(hyp_kw | ref_kw)
+ 
+ 
+def code_bleu(
+    hypothesis: List[str],
+    reference:  List[str],
+    alpha:      float = 0.8,   # weight for BLEU
+    beta:       float = 0.2,   # weight for keyword match
+) -> float:
+    """
+    Lightweight CodeBLEU = α·BLEU + β·KeywordMatch.
+ 
+    Full CodeBLEU also includes data-flow match; that requires
+    a Java parser (e.g. tree-sitter) and is left as an extension.
+    """
+    bl = bleu_score(hypothesis, reference)
+    kw = _keyword_overlap(hypothesis, reference)
+    return alpha * bl + beta * kw
