@@ -47,6 +47,48 @@ def bleu_score(
  
     return bp * math.exp(log_bleu / max_n)
 
+def corpus_bleu_score(
+    hypotheses: List[List[str]],
+    references: List[List[str]],
+    max_n: int = 4,
+    smooth: bool = False,
+) -> float:
+    """Standard corpus BLEU over tokenized hypotheses and references."""
+    if not hypotheses or not references:
+        return 0.0
+
+    clipped_counts = [0] * max_n
+    total_counts = [0] * max_n
+    hyp_len = 0
+    ref_len = 0
+
+    for hypothesis, reference in zip(hypotheses, references):
+        hyp_len += len(hypothesis)
+        ref_len += len(reference)
+
+        for n in range(1, max_n + 1):
+            hyp_ngrams = _ngrams(hypothesis, n)
+            ref_ngrams = _ngrams(reference, n)
+            clipped_counts[n - 1] += sum(
+                min(count, ref_ngrams[gram]) for gram, count in hyp_ngrams.items()
+            )
+            total_counts[n - 1] += max(len(hypothesis) - n + 1, 0)
+
+    if hyp_len == 0:
+        return 0.0
+
+    precisions = []
+    for clipped, total in zip(clipped_counts, total_counts):
+        if smooth:
+            precisions.append((clipped + 1) / (total + 1))
+        elif total == 0 or clipped == 0:
+            return 0.0
+        else:
+            precisions.append(clipped / total)
+
+    bp = 1.0 if hyp_len > ref_len else math.exp(1 - (ref_len / max(hyp_len, 1)))
+    return bp * math.exp(sum(math.log(p) for p in precisions) / max_n)
+
 JAVA_STRUCTURAL_KEYWORDS = {
     "class", "public", "private", "protected", "static", "final",
     "void", "return", "new", "this", "super", "extends", "implements",
@@ -126,6 +168,10 @@ class TranslationEvaluator:
         self.tgt_tokenizer = tgt_tokenizer
         self.tgt_vocab     = tgt_vocab
         self.check_compile = check_compile
+
+    def _strip_special_tokens(self, tokens: List[str]) -> List[str]:
+        specials = {"<PAD>", "<SOS>", "<EOS>"}
+        return [token for token in tokens if token not in specials]
  
     def evaluate(
         self,
@@ -136,11 +182,13 @@ class TranslationEvaluator:
         codebleus  = []
         exacts     = []
         compiles   = []
- 
+        corpus_hyp_tokens = []
+        corpus_ref_tokens = []
+
         for hyp_ids, ref_ids in zip(hyp_id_lists, ref_id_lists):
-            hyp_tokens = self.tgt_vocab.decode(hyp_ids)
-            ref_tokens = self.tgt_vocab.decode(ref_ids)
- 
+            hyp_tokens = self._strip_special_tokens(self.tgt_vocab.decode(hyp_ids))
+            ref_tokens = self._strip_special_tokens(self.tgt_vocab.decode(ref_ids))
+
             bl = bleu_score(hyp_tokens, ref_tokens)
             cb = code_bleu(hyp_tokens, ref_tokens)
  
@@ -151,6 +199,8 @@ class TranslationEvaluator:
             bleus.append(bl)
             codebleus.append(cb)
             exacts.append(em)
+            corpus_hyp_tokens.append(hyp_tokens)
+            corpus_ref_tokens.append(ref_tokens)
  
             if self.check_compile:
                 ok = check_compilable(hyp_code)
@@ -158,7 +208,8 @@ class TranslationEvaluator:
                     compiles.append(ok)
  
         metrics = {
-            "bleu":       sum(bleus)     / len(bleus),
+            "bleu":       corpus_bleu_score(corpus_hyp_tokens, corpus_ref_tokens),
+            "avg_sentence_bleu": sum(bleus) / len(bleus),
             "code_bleu":  sum(codebleus) / len(codebleus),
             "exact_match": sum(exacts)   / len(exacts),
             "n_samples":  len(bleus),
@@ -172,6 +223,7 @@ class TranslationEvaluator:
         print("\n── Evaluation Results ──────────────────────────────")
         print(f"  Samples      : {metrics['n_samples']}")
         print(f"  BLEU-4       : {metrics['bleu']:.4f}")
+        print(f"  Sent BLEU    : {metrics['avg_sentence_bleu']:.4f}")
         print(f"  CodeBLEU     : {metrics['code_bleu']:.4f}")
         print(f"  Exact Match  : {metrics['exact_match']:.2%}")
         if "compile_rate" in metrics:

@@ -3,18 +3,19 @@ from checkpointing.data.dataset  import (load_jsonl, build_vocabs, get_dataloade
                                 generate_synthetic_pairs)
 from py2java.model.seq2seq import Seq2SeqTranslator
 from Seq2SeqTranslator.training.trainer  import Trainer
-from generator.evaluation.metrics import TranslationEvaluator
+from generator.evaluation.metrics import TranslationEvaluator, check_compilable
 from generator.utils.tokenizer   import CodeTokenizer
 import random
 import os
 import torch
 import argparse
+import re
 
 DEFAULT_CONFIG = {
     # Model
-    "embed_dim":       256,
-    "hidden_dim":      512,
-    "n_layers":        2,
+    "embed_dim":       128,
+    "hidden_dim":      256,
+    "n_layers":        1,
     "dropout":         0.3,
     # Training
     "lr":              1e-3,
@@ -29,6 +30,12 @@ DEFAULT_CONFIG = {
     "max_tgt_len":     768,
     "min_freq":        2,
     "val_split":       0.1,
+    "seed":            42,
+    "eval_beam_size":  4,
+    "beam_alpha":      0.6,
+    "patience":        5,
+    "bleu_eval_interval": 1,
+    "val_eval_max_samples": None,
     # I/O
     "save_dir":        "checkpoints",
 }
@@ -49,17 +56,56 @@ def build_model(src_vocab, tgt_vocab, config) -> Seq2SeqTranslator:
         eos_idx        = tgt_vocab.eos_idx,
     )
 
+def set_seed(seed: int):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+def infer_java_class_name(java_code: str) -> str:
+    match = re.search(r"\bclass\s+([A-Za-z_]\w*)", java_code)
+    return match.group(1) if match else "Translated"
+
+def select_prediction(model, src_ids, src_mask, args, config, tgt_vocab, tgt_tok):
+    if args.beam > 1:
+        candidates = model.translate_beam(
+            src_ids,
+            src_mask,
+            beam_size=args.beam,
+            max_len=config["max_tgt_len"],
+            length_penalty_alpha=config["beam_alpha"],
+            return_all=args.compile_rerank,
+        )
+        if args.compile_rerank and candidates:
+            for candidate in candidates:
+                candidate_tokens = tgt_vocab.decode(candidate)
+                candidate_code = tgt_tok.detokenize(candidate_tokens)
+                class_name = infer_java_class_name(candidate_code)
+                if check_compilable(candidate_code, class_name=class_name):
+                    return candidate
+            return candidates[0]
+        return candidates
+
+    tgt_ids, _ = model.translate_greedy(src_ids, src_mask, max_len=config["max_tgt_len"])
+    return tgt_ids
+
 def run_train(args, config):
+    set_seed(config["seed"])
     # Load data
     if args.synthetic:
         pairs = generate_synthetic_pairs(n=args.synthetic_n)
     else:
-        pairs = load_jsonl(args.data)
+        pairs = load_jsonl(args.data, dedupe=True)
  
     # Train / val split
-    random.shuffle(pairs)
-    split = int(len(pairs) * (1 - config["val_split"]))
-    train_pairs, val_pairs = pairs[:split], pairs[split:]
+    if args.val:
+        random.shuffle(pairs)
+        train_pairs = pairs
+        val_pairs = load_jsonl(args.val, dedupe=True)
+    else:
+        random.shuffle(pairs)
+        split = int(len(pairs) * (1 - config["val_split"]))
+        train_pairs, val_pairs = pairs[:split], pairs[split:]
  
     # Vocabularies
     src_vocab, tgt_vocab = build_vocabs(train_pairs, min_freq=config["min_freq"])
@@ -70,6 +116,8 @@ def run_train(args, config):
         train_pairs, val_pairs,
         src_vocab, tgt_vocab,
         batch_size = config["batch_size"],
+        max_src_len = config["max_src_len"],
+        max_tgt_len = config["max_tgt_len"],
     )
  
     # Model
@@ -93,6 +141,7 @@ def run_train(args, config):
 
 def run_translate(args, config):
     import pickle
+    set_seed(config["seed"])
  
     vocab_path = os.path.join(os.path.dirname(args.checkpoint), "vocabs.pkl")
     with open(vocab_path, "rb") as f:
@@ -115,11 +164,8 @@ def run_translate(args, config):
     src_ids  = torch.tensor([src_vocab.encode(tokens)], dtype=torch.long)
     src_mask = (src_ids == src_vocab.pad_idx)
  
-    if args.beam > 1:
-        tgt_ids = model.translate_beam(src_ids, src_mask, beam_size=args.beam)
-    else:
-        tgt_ids, _ = model.translate_greedy(src_ids, src_mask)
- 
+    tgt_ids = select_prediction(model, src_ids, src_mask, args, config, tgt_vocab, tgt_tok)
+
     tgt_tokens = tgt_vocab.decode(tgt_ids)
     java_code  = tgt_tok.detokenize(tgt_tokens)
  
@@ -137,6 +183,7 @@ def run_eval(args, config):
     import os
     import pickle
     import torch
+    set_seed(config["seed"])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Eval] Device: {device}")
@@ -151,7 +198,7 @@ def run_eval(args, config):
     model.load_state_dict(ckpt["model"])
     model.eval()
 
-    pairs = load_jsonl(args.data)
+    pairs = load_jsonl(args.data, dedupe=False)
     print(f"[Eval] Loaded {len(pairs)} pairs from {args.data}")
 
     src_tok = CodeTokenizer("python")
@@ -172,11 +219,7 @@ def run_eval(args, config):
             )
             src_mask = (src_ids == src_vocab.pad_idx)
 
-            pred_ids, _ = model.translate_greedy(
-                src_ids,
-                src_mask,
-                max_len=config["max_tgt_len"]
-            )
+            pred_ids = select_prediction(model, src_ids, src_mask, args, config, tgt_vocab, tgt_tok)
 
             if isinstance(pred_ids, torch.Tensor):
                 pred_ids = pred_ids.squeeze(0).detach().cpu().tolist()
@@ -220,6 +263,17 @@ def parse_args():
     p.add_argument("--n_layers",    type=int,   default=DEFAULT_CONFIG["n_layers"])
     p.add_argument("--lr",          type=float, default=DEFAULT_CONFIG["lr"])
     p.add_argument("--dropout",     type=float, default=DEFAULT_CONFIG["dropout"])
+    p.add_argument("--min_freq",    type=int,   default=DEFAULT_CONFIG["min_freq"])
+    p.add_argument("--max_src_len", type=int,   default=DEFAULT_CONFIG["max_src_len"])
+    p.add_argument("--max_tgt_len", type=int,   default=DEFAULT_CONFIG["max_tgt_len"])
+    p.add_argument("--seed",        type=int,   default=DEFAULT_CONFIG["seed"])
+    p.add_argument("--patience",    type=int,   default=DEFAULT_CONFIG["patience"])
+    p.add_argument("--beam_alpha",  type=float, default=DEFAULT_CONFIG["beam_alpha"])
+    p.add_argument("--eval_beam",   type=int,   default=DEFAULT_CONFIG["eval_beam_size"])
+    p.add_argument("--bleu_eval_interval", type=int,
+                   default=DEFAULT_CONFIG["bleu_eval_interval"])
+    p.add_argument("--val_eval_max_samples", type=int,
+                   default=DEFAULT_CONFIG["val_eval_max_samples"])
  
     # Checkpointing
     p.add_argument("--checkpoint",  type=str, help="Path to checkpoint (.pt)")
@@ -231,6 +285,8 @@ def parse_args():
     p.add_argument("--output",      type=str, help="Output Java file path")
     p.add_argument("--beam",        type=int, default=1,
                    help="Beam size (1 = greedy)")
+    p.add_argument("--compile_rerank", action="store_true",
+                   help="Prefer the first compilable candidate among beam outputs")
  
     # Evaluation
     p.add_argument("--compile_check", action="store_true",
@@ -253,6 +309,16 @@ if __name__ == "__main__":
         "lr":         args.lr,
         "dropout":    args.dropout,
         "save_dir":   args.save_dir,
+        "min_freq":   args.min_freq,
+        "max_src_len": args.max_src_len,
+        "max_tgt_len": args.max_tgt_len,
+        "seed":       args.seed,
+        "patience":   args.patience,
+        "beam_alpha": args.beam_alpha,
+        "eval_beam_size": args.eval_beam,
+        "bleu_eval_interval": args.bleu_eval_interval,
+        "val_eval_max_samples": args.val_eval_max_samples,
+        "compile_check": args.compile_check,
     })
  
     if args.mode == "train":

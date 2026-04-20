@@ -9,6 +9,8 @@ from torch.optim import Adam
 from typing import Dict, Optional
 import json
 import torch.nn.functional as F
+from generator.evaluation.metrics import TranslationEvaluator
+from generator.utils.tokenizer import CodeTokenizer
 
 class LabelSmoothingLoss(nn.Module):
     """
@@ -119,8 +121,21 @@ class Trainer:
         self.clip         = config.get("grad_clip", 1.0)
         self.save_dir     = config.get("save_dir", "checkpoints")
         self.best_val_loss = float("inf")
-        self.history      = {"train_loss": [], "val_loss": []}
- 
+        self.best_val_bleu = float("-inf")
+        self.no_improve_epochs = 0
+        self.history      = {
+            "train_loss": [],
+            "val_loss": [],
+            "val_bleu": [],
+            "val_exact_match": [],
+        }
+        self.tgt_vocab = tgt_vocab
+        self.evaluator = TranslationEvaluator(
+            CodeTokenizer("java"),
+            tgt_vocab,
+            check_compile=config.get("compile_check", False),
+        )
+
         os.makedirs(self.save_dir, exist_ok=True)
  
     # ── One epoch ─────────────────────────────────────────────────────────────
@@ -159,6 +174,37 @@ class Trainer:
                 n_batches  += 1
  
         return total_loss / max(n_batches, 1)
+
+    def _evaluate_bleu(self) -> Dict[str, float]:
+        hyp_id_lists = []
+        ref_id_lists = []
+        beam_size = self.config.get("eval_beam_size", 4)
+        max_samples = self.config.get("val_eval_max_samples")
+
+        self.model.eval()
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(self.val_dl):
+                src = batch["src"].to(self.device)
+                tgt = batch["tgt"].to(self.device)
+                src_mask = batch["src_mask"].to(self.device)
+
+                for row in range(src.size(0)):
+                    pred_ids = self.model.translate_beam(
+                        src[row:row + 1],
+                        src_mask[row:row + 1],
+                        beam_size=beam_size,
+                        max_len=self.config.get("max_tgt_len", 768),
+                        length_penalty_alpha=self.config.get("beam_alpha", 0.6),
+                    )
+                    hyp_id_lists.append(pred_ids)
+
+                    ref_ids = tgt[row].detach().cpu().tolist()
+                    ref_id_lists.append(ref_ids)
+
+                    if max_samples and len(hyp_id_lists) >= max_samples:
+                        return self.evaluator.evaluate(hyp_id_lists, ref_id_lists)
+
+        return self.evaluator.evaluate(hyp_id_lists, ref_id_lists)
  
     # ── Full training run ─────────────────────────────────────────────────────
  
@@ -178,12 +224,28 @@ class Trainer:
             train_ppl = math.exp(min(train_loss, 20))
             val_ppl   = math.exp(min(val_loss,   20))
             lr        = self.scheduler.get_last_lr()[0]
- 
+            should_eval_bleu = (
+                epoch % self.config.get("bleu_eval_interval", 1) == 0
+                or epoch == n_epochs
+            )
+            bleu_metrics = None
+            if should_eval_bleu:
+                bleu_metrics = self._evaluate_bleu()
+                self.history["val_bleu"].append(bleu_metrics["bleu"])
+                self.history["val_exact_match"].append(bleu_metrics["exact_match"])
+            else:
+                self.history["val_bleu"].append(None)
+                self.history["val_exact_match"].append(None)
+
             print(
                 f"Epoch {epoch:03d}/{n_epochs} | "
                 f"Train Loss {train_loss:.4f} (PPL {train_ppl:.1f}) | "
                 f"Val Loss {val_loss:.4f} (PPL {val_ppl:.1f}) | "
-                f"LR {lr:.2e} | TF {tf_ratio:.2f} | "
+                + (
+                    f"Val BLEU {bleu_metrics['bleu']:.4f} | "
+                    if bleu_metrics is not None else ""
+                )
+                + f"LR {lr:.2e} | TF {tf_ratio:.2f} | "
                 f"Time {elapsed:.1f}s"
             )
  
@@ -194,13 +256,34 @@ class Trainer:
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
                 self._save_checkpoint(epoch, val_loss, tag="best")
- 
+
+            improved_bleu = False
+            if bleu_metrics is not None and bleu_metrics["bleu"] > self.best_val_bleu:
+                self.best_val_bleu = bleu_metrics["bleu"]
+                self._save_checkpoint(epoch, val_loss, tag="best_bleu")
+                improved_bleu = True
+
+            if bleu_metrics is not None:
+                if improved_bleu:
+                    self.no_improve_epochs = 0
+                else:
+                    self.no_improve_epochs += 1
+
+                patience = self.config.get("patience", 5)
+                if patience and self.no_improve_epochs >= patience:
+                    print(f"[Trainer] Early stopping on validation BLEU after epoch {epoch}.")
+                    break
+
             # Periodic checkpoint every 5 epochs
             if epoch % 5 == 0:
                 self._save_checkpoint(epoch, val_loss, tag=f"epoch{epoch}")
  
         self._save_history()
-        print(f"\n[Trainer] Training complete. Best val loss: {self.best_val_loss:.4f}")
+        print(
+            f"\n[Trainer] Training complete. "
+            f"Best val loss: {self.best_val_loss:.4f} | "
+            f"Best val BLEU: {self.best_val_bleu:.4f}"
+        )
 
     def _save_checkpoint(self, epoch: int, val_loss: float, tag: str = "ckpt"):
         path = os.path.join(self.save_dir, f"model_{tag}.pt")

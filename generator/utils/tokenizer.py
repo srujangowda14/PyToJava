@@ -53,6 +53,8 @@ class CodeTokenizer:
  
     def tokenize(self, code: str) -> List[str]:
         """Convert raw source code string → list of tokens."""
+        if self._looks_pretokenized(code):
+            return self._tokenize_pretokenized(code)
         if self.lang == "python":
             return self._tokenize_python(code)
         return self._tokenize_java(code)
@@ -88,6 +90,17 @@ class CodeTokenizer:
             tokens.extend(line_tokens)
             tokens.append(NEWLINE_TOK)
  
+        return tokens
+
+    def _tokenize_pretokenized(self, code: str) -> List[str]:
+        tokens = []
+        legacy_map = {
+            "NEW_LINE": NEWLINE_TOK,
+            "INDENT": INDENT_TOK,
+            "DEDENT": DEDENT_TOK,
+        }
+        for token in code.split():
+            tokens.append(legacy_map.get(token, token))
         return tokens
  
     # ── Java tokenizer ────────────────────────────────────────────────────────
@@ -131,6 +144,10 @@ class CodeTokenizer:
             else:
                 tokens.append(value)
         return tokens
+
+    def _looks_pretokenized(self, code: str) -> bool:
+        markers = ("NEW_LINE", "INDENT", "DEDENT", "<NL>", "<INDENT>", "<DEDENT>")
+        return any(marker in code for marker in markers) and "\n" not in code
  
     # ── Detokenizer ───────────────────────────────────────────────────────────
  
@@ -138,10 +155,10 @@ class CodeTokenizer:
         lines   = []
         current = []
         indent  = 0
- 
+
         for tok in tokens:
             if tok == NEWLINE_TOK:
-                prefix = "    " * indent if lang == "java" else ""
+                prefix = "    " * indent
                 lines.append(prefix + " ".join(current))
                 current = []
             elif tok == INDENT_TOK:
@@ -211,4 +228,3 @@ class Vocabulary:
     @property
     def eos_idx(self) -> int:
         return self.token2idx[EOS_TOKEN]
-

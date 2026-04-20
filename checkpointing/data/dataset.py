@@ -3,9 +3,10 @@ from generator.utils.tokenizer import (
 )
 from typing import List, Tuple, Dict
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 import json
 import random
+import re
 
 class CodeTranslationDataset(Dataset):
     """
@@ -32,6 +33,10 @@ class CodeTranslationDataset(Dataset):
         self.tgt_tokenizer = tgt_tokenizer
         self.max_src_len   = max_src_len
         self.max_tgt_len   = max_tgt_len
+        self.src_lengths   = [
+            min(len(self.src_tokenizer.tokenize(py_code)), self.max_src_len)
+            for py_code, _ in pairs
+        ]
  
     def __len__(self):
         return len(self.pairs)
@@ -55,6 +60,36 @@ class CodeTranslationDataset(Dataset):
             "src": torch.tensor(src_ids, dtype=torch.long),
             "tgt": torch.tensor(tgt_ids, dtype=torch.long),
         }
+
+class BucketBatchSampler(Sampler[List[int]]):
+    """Length-aware sampler that keeps similarly sized examples together."""
+
+    def __init__(self, lengths: List[int], batch_size: int, shuffle: bool = True):
+        self.lengths = lengths
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+
+    def __iter__(self):
+        indices = list(range(len(self.lengths)))
+        if self.shuffle:
+            random.shuffle(indices)
+
+        window = self.batch_size * 20
+        batches = []
+        for start in range(0, len(indices), window):
+            chunk = indices[start:start + window]
+            chunk.sort(key=lambda idx: self.lengths[idx])
+            for batch_start in range(0, len(chunk), self.batch_size):
+                batches.append(chunk[batch_start:batch_start + self.batch_size])
+
+        if self.shuffle:
+            random.shuffle(batches)
+
+        for batch in batches:
+            yield batch
+
+    def __len__(self):
+        return (len(self.lengths) + self.batch_size - 1) // self.batch_size
     
 def collate_fn(
     batch: List[Dict[str, torch.Tensor]],
@@ -83,13 +118,26 @@ def collate_fn(
         "tgt_mask": tgt_mask,
     }
 
-def load_jsonl(path: str) -> List[Tuple[str, str]]:
+def normalize_code_pair(py_code: str, java_code: str) -> Tuple[str, str]:
+    py_code = re.sub(r"\s+", " ", py_code).strip()
+    java_code = re.sub(r"\s+", " ", java_code).strip()
+    return py_code, java_code
+
+def load_jsonl(path: str, dedupe: bool = False) -> List[Tuple[str, str]]:
     """Load JSONL file with {"python": ..., "java": ...} records."""
     pairs = []
+    seen = set()
     with open(path) as f:
         for line in f:
             obj = json.loads(line)
-            pairs.append((obj["python"], obj["java"]))
+            pair = normalize_code_pair(obj["python"], obj["java"])
+            if not pair[0] or not pair[1]:
+                continue
+            if dedupe:
+                if pair in seen:
+                    continue
+                seen.add(pair)
+            pairs.append(pair)
     print(f"[Data] Loaded {len(pairs)} pairs from {path}")
     return pairs
  
@@ -119,6 +167,9 @@ def get_dataloaders(
     tgt_vocab:   Vocabulary,
     batch_size:  int = 16,
     num_workers: int = 0,
+    max_src_len: int = 512,
+    max_tgt_len: int = 768,
+    bucketed: bool = True,
 ) -> Tuple[DataLoader, DataLoader]:
  
     src_tok = CodeTokenizer("python")
@@ -131,11 +182,38 @@ def get_dataloaders(
         tgt_pad_idx=tgt_vocab.pad_idx,
     )
  
-    train_ds = CodeTranslationDataset(train_pairs, src_vocab, tgt_vocab, src_tok, tgt_tok)
-    val_ds   = CodeTranslationDataset(val_pairs,   src_vocab, tgt_vocab, src_tok, tgt_tok)
- 
-    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                          collate_fn=_collate, num_workers=num_workers)
+    train_ds = CodeTranslationDataset(
+        train_pairs, src_vocab, tgt_vocab, src_tok, tgt_tok,
+        max_src_len=max_src_len, max_tgt_len=max_tgt_len,
+    )
+    val_ds   = CodeTranslationDataset(
+        val_pairs, src_vocab, tgt_vocab, src_tok, tgt_tok,
+        max_src_len=max_src_len, max_tgt_len=max_tgt_len,
+    )
+
+    train_sampler = None
+    if bucketed:
+        train_sampler = BucketBatchSampler(
+            train_ds.src_lengths,
+            batch_size=batch_size,
+            shuffle=True,
+        )
+
+    if train_sampler is not None:
+        train_dl = DataLoader(
+            train_ds,
+            batch_sampler=train_sampler,
+            collate_fn=_collate,
+            num_workers=num_workers,
+        )
+    else:
+        train_dl = DataLoader(
+            train_ds,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=_collate,
+            num_workers=num_workers,
+        )
     val_dl   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
                           collate_fn=_collate, num_workers=num_workers)
  

@@ -163,7 +163,7 @@ class Decoder(nn.Module):
         encoder_outputs: torch.Tensor,   # [B, S, 2H]
         src_mask:        torch.Tensor,   # [B, S]
         prev_context:    torch.Tensor,   # [B, 2H]
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
             logits   : [B, vocab_size]
@@ -173,24 +173,23 @@ class Decoder(nn.Module):
         # top hidden layer for attention query
         query = hidden[-1]                              # [B, H]
  
-        # Attention
-        context, attn_w = self.attention(query, encoder_outputs, src_mask)
- 
-        # Embed + concat context (input feeding)
+        # True input feeding uses the previous attention context as decoder input.
         embedded = self.dropout(self.embedding(token.unsqueeze(1)))  # [B, 1, E]
         rnn_input = torch.cat(
-            [embedded, context.unsqueeze(1)], dim=2
+            [embedded, prev_context.unsqueeze(1)], dim=2
         )                                               # [B, 1, E+2H]
- 
+
         output, hidden = self.rnn(rnn_input, hidden)   # output: [B, 1, H]
         output = output.squeeze(1)                     # [B, H]
- 
+
+        context, attn_w = self.attention(output, encoder_outputs, src_mask)
+
         # Project
         logits = self.fc_out(
             torch.cat([output, context], dim=1)
         )                                               # [B, vocab_size]
- 
-        return logits, hidden, attn_w
+
+        return logits, hidden, attn_w, context
     
 class Seq2SeqTranslator(nn.Module):
     """
@@ -265,8 +264,6 @@ class Seq2SeqTranslator(nn.Module):
         """
         batch_size  = src.size(0)
         tgt_len     = tgt.size(1)
-        tgt_vocab   = self.decoder.vocab_size
- 
         # Encode
         enc_outputs, hidden = self.encoder(src, src_mask)
  
@@ -280,7 +277,7 @@ class Seq2SeqTranslator(nn.Module):
         all_logits = []
  
         for t in range(1, tgt_len):
-            logits, hidden, _ = self.decoder.forward_step(
+            logits, hidden, _, prev_context = self.decoder.forward_step(
                 dec_input, hidden, enc_outputs, src_mask, prev_context
             )
             all_logits.append(logits.unsqueeze(1))         # [B, 1, V]
@@ -318,7 +315,7 @@ class Seq2SeqTranslator(nn.Module):
         attn_matrix  = []
  
         for _ in range(max_len):
-            logits, hidden, attn_w = self.decoder.forward_step(
+            logits, hidden, attn_w, prev_context = self.decoder.forward_step(
                 dec_input, hidden, enc_outputs, src_mask, prev_context
             )
             pred = logits.argmax(dim=1)   # [1]
@@ -343,6 +340,8 @@ class Seq2SeqTranslator(nn.Module):
         src_mask: torch.Tensor,
         beam_size: int = 4,
         max_len:   int = 768,
+        length_penalty_alpha: float = 0.6,
+        return_all: bool = False,
     ) -> List[int]:
         """
         Beam search decoding. Returns best hypothesis token ids.
@@ -354,27 +353,27 @@ class Seq2SeqTranslator(nn.Module):
         # Each beam: (log_prob, token_ids, hidden, prev_context)
         beams = [(0.0, [self.sos_idx], hidden, prev_context)]
         completed = []
- 
+
         for _ in range(max_len):
             new_beams = []
             for log_prob, tokens, h, ctx in beams:
                 if tokens[-1] == self.eos_idx:
                     completed.append((log_prob, tokens[1:-1]))
                     continue
- 
+
                 dec_input = torch.tensor([tokens[-1]], device=src.device)
-                logits, new_h, _ = self.decoder.forward_step(
+                logits, new_h, _, new_ctx = self.decoder.forward_step(
                     dec_input, h, enc_outputs, src_mask, ctx
                 )
                 log_probs = F.log_softmax(logits, dim=1).squeeze(0)  # [V]
                 top_log_probs, top_ids = log_probs.topk(beam_size)
- 
+
                 for lp, tid in zip(top_log_probs.tolist(), top_ids.tolist()):
                     new_beams.append((
                         log_prob + lp,
                         tokens + [tid],
                         new_h,
-                        ctx,
+                        new_ctx,
                     ))
  
             if not new_beams:
@@ -388,10 +387,18 @@ class Seq2SeqTranslator(nn.Module):
             completed.append((log_prob, tokens[1:]))
  
         if not completed:
-            return []
- 
-        best = max(completed, key=lambda x: x[0])
-        return best[1]
+            return [] if not return_all else []
+
+        def score(item):
+            log_prob, tokens = item
+            length = max(len(tokens), 1)
+            penalty = ((5 + length) / 6) ** length_penalty_alpha
+            return log_prob / penalty
+
+        ranked = sorted(completed, key=score, reverse=True)
+        if return_all:
+            return [tokens for _, tokens in ranked]
+        return ranked[0][1]
  
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
