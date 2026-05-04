@@ -1,281 +1,502 @@
-# PyToJava 🐍 → ☕
+# PyToJava
 
-A custom sequence-to-sequence model trained from scratch for **Python-to-Java code translation** at the snippet/statement level. Built as a research project for CSCI 544 (NLP) at the University of Southern California.
+Python-to-Java code translation using a custom sequence-to-sequence model built in PyTorch.
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange)](https://pytorch.org/)
-[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+This project trains a bidirectional GRU encoder with Bahdanau attention and a GRU decoder to translate Python snippets into Java snippets. The codebase includes dataset preparation, structure-aware tokenization, training, beam-search decoding, and evaluation with BLEU-style metrics.
 
----
+## What This Repository Contains
 
-## Overview
+- `py2java/main.py`: CLI entry point for training, translation, and evaluation
+- `py2java/model/seq2seq.py`: encoder, attention module, decoder, and beam search
+- `Seq2SeqTranslator/training/trainer.py`: training loop, label smoothing, scheduler, checkpointing, validation BLEU tracking
+- `checkpointing/data/dataset.py`: JSONL loader, normalization, vocabulary building, batching
+- `generator/utils/tokenizer.py`: structure-aware tokenizer and vocabulary
+- `generator/evaluation/metrics.py`: BLEU, corpus BLEU, CodeBLEU, exact match, optional compile check
+- `prepare_data.py`: converts tokenized `.py` / `.java` parallel files into JSONL files used by training
 
-PyToJava translates Python code snippets into semantically equivalent Java code using a custom **bidirectional GRU encoder** with **Bahdanau attention** and an **input-feeding GRU decoder** — trained entirely from scratch, no pretrained backbone.
+## Environment Setup
 
-### Example Translations
+### 1. Python Version
 
-| Python Input | Generated Java |
-|---|---|
-| `for i in range ( n ) :` | `for ( int i = 0 ; i < n ; i ++ ) {` |
-| `if ( left == None ) :` | `if ( left == null ) {` |
-| `return True` | `return true ; }` |
-| `count = 0` | `int count = 0 ;` |
-| `def gcd ( a , b ) :` | `static int gcd ( int a , int b ) {` |
+Use Python `3.10+` if possible. The repository has been structured for modern PyTorch and standard library behavior.
 
----
-
-## Architecture
-
-```
-Python tokens → [Bi-GRU Encoder] → [Bahdanau Attention] → [GRU Decoder] → Java tokens
-```
-
-| Component | Details |
-|---|---|
-| Encoder | 2-layer Bidirectional GRU, hidden dim 256 |
-| Attention | Bahdanau (additive) with padding mask |
-| Decoder | 2-layer Unidirectional GRU with input feeding |
-| Embedding | 128-dim learned embeddings, dropout 0.3 |
-| Decoding | Beam search (beam=4) at inference |
-| Parameters | ~17M |
-
-### Why GRU over Transformer?
-Training from scratch on ~10K pairs — Transformers need massive data to outperform GRUs. GRU's sequential inductive bias is better suited to limited parallel corpora and matches the TransCoder baseline architecture for direct comparison.
-
----
-
-## Results
-
-Evaluated on the XLCoST Java-Python test split (7,259 samples):
-
-| Metric | Score |
-|---|---|
-| **BLEU-4** | **0.7304** |
-| **CodeBLEU** | **0.7522** |
-| **Exact Match** | **28.13%** |
-
-These results significantly outperform published baselines for scratch-trained models:
-
-| Model | BLEU-4 | Training |
-|---|---|---|
-| PyToJava (ours) | 0.73 | From scratch, 10K pairs |
-| TransCoder | ~0.35 | Pretrained, millions of pairs |
-| CodeT5 | ~0.45 | Pretrained, large corpus |
-
-> **Note:** High scores reflect XLCoST's pre-tokenized, normalized format. Raw source code translation requires a preprocessing step to match the training distribution.
-
----
-
-## Project Structure
-
-```
-py2java/
-├── main.py                  ← Entry point (train / translate / eval)
-├── requirements.txt
-├── model/
-│   └── seq2seq.py           ← Encoder, BahdanauAttention, Decoder, Seq2SeqTranslator
-├── training/
-│   └── trainer.py           ← Training loop, label smoothing, LR scheduling, checkpointing
-├── data/
-│   └── dataset.py           ← Dataset, collate, vocab builder, synthetic generator
-├── utils/
-│   └── tokenizer.py         ← Structure-aware tokenizer (Python + Java), Vocabulary
-└── evaluation/
-    └── metrics.py           ← BLEU-4, CodeBLEU, Exact Match, javac compile check
-```
-
----
-
-## Setup
-
-### Requirements
+### 2. Create and Activate a Virtual Environment
 
 ```bash
-pip install torch>=2.0.0 numpy>=1.24.0
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
-### Data Preparation
-
-Download the [XLCoST dataset](https://github.com/reddy-lab-code-research/XLCoST) and convert to JSONL format:
-
-```python
-# prepare_data.py
-import json
-
-def convert(py_path, java_path, out_path):
-    with open(py_path) as f_py, open(java_path) as f_java, open(out_path, "w") as f_out:
-        py_lines   = f_py.read().strip().split("\n")
-        java_lines = f_java.read().strip().split("\n")
-        for py, java in zip(py_lines, java_lines):
-            f_out.write(json.dumps({"python": py.strip(), "java": java.strip()}) + "\n")
-
-BASE = "/path/to/XLCoST/Java-Python/"
-convert(BASE + "train-Java-Python-tok.py", BASE + "train-Java-Python-tok.java", "train.jsonl")
-convert(BASE + "val-Java-Python-tok.py",   BASE + "val-Java-Python-tok.java",   "val.jsonl")
-convert(BASE + "test-Java-Python-tok.py",  BASE + "test-Java-Python-tok.java",  "test.jsonl")
-```
-
-The JSONL format expected:
-```json
-{"python": "for i in range ( n ) : NEW_LINE", "java": "for ( int i = 0 ; i < n ; i ++ ) {"}
-```
-
----
-
-## Usage
-
-### Train
+### 3. Install Dependencies
 
 ```bash
-# Quick smoke test with synthetic data (no real data needed)
-python3 -m py2java.main --mode train --synthetic --synthetic_n 500 --epochs 10
-
-# Train on XLCoST with pre-split validation
-python3 -m py2java.main \
-    --mode train \
-    --data train.jsonl \
-    --val val.jsonl \
-    --epochs 30 \
-    --hidden_dim 256 \
-    --embed_dim 128 \
-    --batch_size 8
-
-# Resume from checkpoint
-python3 -m py2java.main \
-    --mode train \
-    --data train.jsonl \
-    --resume checkpoints/model_epoch25.pt \
-    --epochs 30
+pip install --upgrade pip
+pip install -r py2java/requirements.txt
 ```
 
-### Translate
+Current required packages:
 
-Input must be in XLCoST pre-tokenized format (space-separated tokens with `NEW_LINE`, `INDENT`, `DEDENT` markers):
+- `torch>=2.0.0`
+- `numpy>=1.24.0`
+
+### 4. Optional Dependency for Compile Checking
+
+If you want evaluation to also verify whether generated Java compiles, install a JDK so `javac` is available on your `PATH`.
+
+Check it with:
 
 ```bash
-python3 -m py2java.main \
-    --mode translate \
-    --input snippet.py \
-    --output snippet.java \
-    --checkpoint checkpoints/model_best.pt \
-    --beam 4
+javac -version
 ```
 
-Example input file (`snippet.py`):
-```
-def gcd ( a , b ) : NEW_LINE INDENT if ( a == 0 ) : NEW_LINE INDENT return b ; NEW_LINE DEDENT return gcd ( b % a , a ) ; NEW_LINE DEDENT
-```
+## Device / System Used to Run the Code
 
-### Evaluate
+The code is written to run on either:
+
+- CPU
+- NVIDIA CUDA GPU
+
+### How Device Selection Works
+
+- Training uses `cuda` automatically if `torch.cuda.is_available()` is `True`; otherwise it falls back to CPU.
+- Evaluation uses the same `cuda`-if-available behavior.
+- Translation currently loads the checkpoint on CPU for portability.
+
+That behavior comes directly from:
+
+- [Seq2SeqTranslator/training/trainer.py](/Users/srujangowda/Projects/PyToJava/Seq2SeqTranslator/training/trainer.py:90)
+- [py2java/main.py](/Users/srujangowda/Projects/PyToJava/py2java/main.py:171)
+
+### Recommended Systems
+
+- Local Linux or macOS machine with Python 3.10+
+- Google Colab with an NVIDIA T4 GPU for faster training
+- Any CUDA-capable GPU machine supported by your PyTorch install
+
+### Check Which Device PyTorch Sees
 
 ```bash
-# Standard evaluation
-python3 -m py2java.main \
-    --mode eval \
-    --data test.jsonl \
-    --checkpoint checkpoints/model_best.pt
-
-# With javac compilation check (requires Java installed)
-python3 -m py2java.main \
-    --mode eval \
-    --data test.jsonl \
-    --checkpoint checkpoints/model_best.pt \
-```
-
----
-
-## Training on Google Colab (Recommended)
-
-The model trains in ~2-3 hours on a T4 GPU. CPU training is not recommended (100+ hours).
-
-```python
-# Cell 1 — Mount Drive
-from google.colab import drive
-drive.mount('/content/drive')
-
-# Cell 2 — Install dependencies
-!pip install torch -q
-
-# Cell 3 — Verify GPU
+python3 - <<'PY'
 import torch
-print(torch.cuda.get_device_name(0))  # Tesla T4
-
-# Cell 4 — Train
-!python3 -m py2java.main \
-    --mode train \
-    --data train.jsonl \
-    --val val.jsonl \
-    --epochs 30 \
-    --batch_size 8 \
-    --hidden_dim 256 \
-    --embed_dim 128 \
-    --save_dir /content/drive/MyDrive/py2java_checkpoints
+print("CUDA available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("GPU:", torch.cuda.get_device_name(0))
+else:
+    print("Using CPU")
+PY
 ```
 
----
+## Data Format and Preparation
 
-## Training Details
+The training pipeline expects JSONL files where each line looks like:
 
-| Hyperparameter | Value |
-|---|---|
-| Optimizer | Adam |
-| Learning rate | 1e-3 with linear warm-up (200 steps) + cosine decay |
-| Batch size | 16 |
-| Dropout | 0.3 |
-| Label smoothing | 0.1 |
-| Teacher forcing | Linear decay 1.0 → 0.5 over 30 epochs |
-| Gradient clipping | max norm 1.0 |
-| Epochs | 30 |
-| Training pairs | 10,000 (subset of XLCoST 77K) |
-| Best val loss | 3.7181 (PPL 41.2) |
+```json
+{"python": "def gcd ( a , b ) : NEW_LINE INDENT return a NEW_LINE DEDENT", "java": "static int gcd ( int a , int b ) { return a ; }"}
+```
 
-### Training Curve
+The repository already contains:
 
-Train loss converged to ~1.54 (PPL 4.6) while validation loss stabilized at ~3.72 (PPL 41.2) by epoch 27, indicating moderate overfitting — expected given the 10K training size relative to model capacity.
+- `train.jsonl`
+- `val.jsonl`
+- `test.jsonl`
+- `train_small.jsonl`
 
----
+If you need to regenerate them from tokenized parallel files in `data/`, run:
 
-## Key Design Decisions
+```bash
+python3 prepare_data.py
+```
 
-**Structure-aware tokenizer** — Python's indentation-based scoping is encoded via `<INDENT>` and `<DEDENT>` special tokens, making block structure explicit without requiring a full AST parser.
+That script reads:
 
-**Label smoothing (0.1)** — Prevents overconfidence and improves generalization on limited data. Standard for seq2seq models since the original Transformer paper.
+- `data/train-Java-Python-tok.py`
+- `data/train-Java-Python-tok.java`
+- `data/val-Java-Python-tok.py`
+- `data/val-Java-Python-tok.java`
+- `data/test-Java-Python-tok.py`
+- `data/test-Java-Python-tok.java`
 
-**Teacher forcing decay** — Ratio decays linearly from 1.0 to 0.5 to close the gap between training (guided) and inference (autoregressive) behavior.
+and writes:
 
-**Input feeding** — Previous attention context is fed back as decoder input, creating a coherent cross-step attention feedback loop (Luong et al., 2015).
+- `train.jsonl`
+- `val.jsonl`
+- `test.jsonl`
+- `train_small.jsonl`
 
-**Vocabulary pruning (min_freq=2)** — Tokens appearing fewer than twice are mapped to `<UNK>`, keeping vocabulary manageable (~2K tokens) and preventing overfitting on rare identifiers.
+## How the Tokenization Works
 
----
+The tokenizer is structure-aware and lives in [generator/utils/tokenizer.py](/Users/srujangowda/Projects/PyToJava/generator/utils/tokenizer.py:39).
 
-## Known Limitations
+Important details:
 
-- **Input format sensitivity** — Model expects XLCoST pre-tokenized format. Raw Python source requires preprocessing to match training distribution.
-- **Overfitting on 10K subset** — Train PPL (4.6) vs Val PPL (41.2) gap suggests the model would benefit from training on the full 77K XLCoST corpus.
-- **Snippet-level only** — Translations are at the statement/snippet level. Full class-level translation with consistent type inference across methods is future work.
-- **Type inference** — Static Java types are inferred from context but can be incorrect for complex expressions.
+- It preserves Python block structure using special tokens such as `<INDENT>`, `<DEDENT>`, and `<NL>`.
+- It recognizes the repository's pretokenized dataset format and maps:
+  - `NEW_LINE -> <NL>`
+  - `INDENT -> <INDENT>`
+  - `DEDENT -> <DEDENT>`
+- It normalizes:
+  - string literals to `<STR>`
+  - numeric literals to `<NUM>`
+- It strips comments during tokenization.
 
----
+This is important because Python syntax depends on indentation, and the model needs that structural signal to learn Python-to-Java block translation.
 
-## Future Work
+## How to Run the Code
 
-- Train on full XLCoST 77K corpus
-- Add AST-based structural loss (full CodeBLEU)
-- Extend to class-level translation (AlphaTrans-style compositional approach)
-- Add identifier substitution post-processing for raw source input
-- Replace GRU with Transformer once sufficient data is available
+The project supports three modes:
 
----
+- `train`
+- `eval`
+- `translate`
 
-## References
+All three are run through:
 
-- Roziere et al. (2020). *Unsupervised Translation of Programming Languages.* NeurIPS 2020.
-- Wang et al. (2021). *CodeT5: Identifier-aware Unified Pre-trained Encoder-Decoder Models.* EMNLP 2021.
-- Pan et al. (2024). *AlphaTrans: Neuro-Symbolic Repository-Level Code Translation.* FSE 2025.
-- Ren et al. (2020). *CodeBLEU: A Method for Automatic Evaluation of Code Synthesis.* arXiv:2009.10297.
-- Zhu et al. (2022). *XLCoST: A Benchmark Dataset for Cross-Lingual Code Intelligence.* arXiv:2206.08474.
-- Bahdanau et al. (2015). *Neural Machine Translation by Jointly Learning to Align and Translate.* ICLR 2015.
-- Luong et al. (2015). *Effective Approaches to Attention-based Neural Machine Translation.* EMNLP 2015.
+```bash
+python3 -m py2java.main ...
+```
 
----
+### 1. Train the Model
+
+Train on the full train/validation split:
+
+```bash
+python3 -m py2java.main \
+  --mode train \
+  --data train.jsonl \
+  --val val.jsonl \
+  --save_dir checkpoints_run
+```
+
+Useful training arguments:
+
+- `--epochs`
+- `--batch_size`
+- `--hidden_dim`
+- `--embed_dim`
+- `--n_layers`
+- `--max_src_len`
+- `--max_tgt_len`
+- `--min_freq`
+- `--seed`
+- `--patience`
+- `--eval_beam`
+- `--beam_alpha`
+- `--val_eval_max_samples`
+- `--bleu_eval_interval`
+
+Example with explicit settings:
+
+```bash
+python3 -m py2java.main \
+  --mode train \
+  --data train.jsonl \
+  --val val.jsonl \
+  --save_dir checkpoints_run \
+  --epochs 30 \
+  --batch_size 16 \
+  --hidden_dim 256 \
+  --embed_dim 128 \
+  --n_layers 1 \
+  --max_src_len 512 \
+  --max_tgt_len 768 \
+  --eval_beam 4 \
+  --beam_alpha 0.6
+```
+
+#### Quick Smoke Test
+
+Synthetic-data smoke test:
+
+```bash
+python3 -m py2java.main \
+  --mode train \
+  --synthetic \
+  --synthetic_n 500 \
+  --epochs 3 \
+  --save_dir checkpoints_smoke
+```
+
+Small-subset run:
+
+```bash
+python3 -m py2java.main \
+  --mode train \
+  --data train_small.jsonl \
+  --val val.jsonl \
+  --save_dir checkpoints_small
+```
+
+#### Resume Training
+
+```bash
+python3 -m py2java.main \
+  --mode train \
+  --data train.jsonl \
+  --val val.jsonl \
+  --resume checkpoints_run/model_best.pt \
+  --save_dir checkpoints_run
+```
+
+### 2. Evaluate a Checkpoint
+
+Evaluate on the held-out test set:
+
+```bash
+python3 -m py2java.main \
+  --mode eval \
+  --data test.jsonl \
+  --checkpoint checkpoints_run/model_best_bleu.pt \
+  --beam 4
+```
+
+Optional compile check:
+
+```bash
+python3 -m py2java.main \
+  --mode eval \
+  --data test.jsonl \
+  --checkpoint checkpoints_run/model_best_bleu.pt \
+  --beam 4 \
+  --compile_check
+```
+
+### 3. Translate a Single Input File
+
+```bash
+python3 -m py2java.main \
+  --mode translate \
+  --input sample.py \
+  --checkpoint checkpoints_run/model_best_bleu.pt \
+  --beam 4 \
+  --output sample_translated.java
+```
+
+Notes:
+
+- The model is trained on tokenized / normalized code-like inputs, so best results come from inputs that resemble the dataset format.
+- The tokenizer can still process raw source text, but output quality depends on how closely the input matches the training distribution.
+
+## How Results Are Generated
+
+This section explains exactly how the reported metrics are produced in this repository.
+
+### Step 1. Load and Normalize Data
+
+Training, validation, and test files are loaded through `load_jsonl()` in [checkpointing/data/dataset.py](/Users/srujangowda/Projects/PyToJava/checkpointing/data/dataset.py:126).
+
+That loader:
+
+- reads JSONL pairs from disk
+- normalizes whitespace
+- skips empty pairs
+- optionally deduplicates pairs during training
+
+### Step 2. Build Vocabularies
+
+`build_vocabs()` in [checkpointing/data/dataset.py](/Users/srujangowda/Projects/PyToJava/checkpointing/data/dataset.py:136) tokenizes the training pairs and builds:
+
+- source vocabulary for Python tokens
+- target vocabulary for Java tokens
+
+Tokens that appear fewer than `min_freq` times are mapped to `<UNK>`.
+
+### Step 3. Create Batches
+
+`get_dataloaders()` in [checkpointing/data/dataset.py](/Users/srujangowda/Projects/PyToJava/checkpointing/data/dataset.py:151) creates PyTorch dataloaders.
+
+The pipeline:
+
+- encodes source and target token sequences
+- adds `<SOS>` and `<EOS>` to targets
+- pads variable-length batches
+- creates source padding masks
+- uses bucketed batching during training to group similar-length examples
+
+### Step 4. Train the Model
+
+Training happens in [Seq2SeqTranslator/training/trainer.py](/Users/srujangowda/Projects/PyToJava/Seq2SeqTranslator/training/trainer.py:211).
+
+During training, the project uses:
+
+- teacher forcing with linear decay from `1.0` to `0.5`
+- label smoothing
+- gradient clipping
+- Adam optimizer
+- linear warm-up
+- cosine annealing
+
+Two kinds of checkpoints are saved:
+
+- `model_best.pt`: best validation loss
+- `model_best_bleu.pt`: best validation BLEU
+
+This means the final "best model" for translation quality is selected on the validation set, not the test set.
+
+### Step 5. Decode Predictions
+
+At evaluation time, the model generates predictions using:
+
+- greedy decoding if `--beam 1`
+- beam search if `--beam > 1`
+
+Beam search uses length normalization, and optionally supports compile-aware reranking during inference.
+
+### Step 6. Compute Metrics
+
+Metrics are computed in [generator/evaluation/metrics.py](/Users/srujangowda/Projects/PyToJava/generator/evaluation/metrics.py:155).
+
+The evaluation reports:
+
+- `BLEU-4`: corpus BLEU across the full evaluation set
+- `Sent BLEU`: average sentence-level BLEU across examples
+- `CodeBLEU`: lightweight BLEU plus Java keyword overlap
+- `Exact Match`: normalized string equality after detokenization
+- `Compile Rate`: optional, if `--compile_check` is enabled and `javac` is installed
+
+### Important Interpretation Note
+
+The dataset in this repository is already tokenized and normalized, so the reported scores reflect performance on that processed representation. Results on raw hand-written Python files may differ unless the raw input is preprocessed to match the same format.
+
+## Model Architecture Summary
+
+The actual model implementation is in [py2java/model/seq2seq.py](/Users/srujangowda/Projects/PyToJava/py2java/model/seq2seq.py:6).
+
+Architecture:
+
+- bidirectional GRU encoder
+- Bahdanau additive attention
+- GRU decoder
+- input feeding in the decoder
+- greedy and beam-search decoding
+
+Default configuration from [py2java/main.py](/Users/srujangowda/Projects/PyToJava/py2java/main.py:12):
+
+- `embed_dim = 128`
+- `hidden_dim = 256`
+- `n_layers = 1`
+- `dropout = 0.3`
+- `batch_size = 16`
+- `epochs = 30`
+
+## Example Workflow
+
+Train:
+
+```bash
+python3 -m py2java.main \
+  --mode train \
+  --data train.jsonl \
+  --val val.jsonl \
+  --save_dir checkpoints_demo
+```
+
+Evaluate best BLEU checkpoint:
+
+```bash
+python3 -m py2java.main \
+  --mode eval \
+  --data test.jsonl \
+  --checkpoint checkpoints_demo/model_best_bleu.pt \
+  --beam 4
+```
+
+Translate a file:
+
+```bash
+python3 -m py2java.main \
+  --mode translate \
+  --input sample.py \
+  --checkpoint checkpoints_demo/model_best_bleu.pt \
+  --beam 4 \
+  --output sample_translated.java
+```
+
+## Running on Google Colab
+
+Basic Colab flow:
+
+```python
+from google.colab import files
+uploaded = files.upload()
+```
+
+```bash
+%%bash
+unzip -q PyToJava_colab.zip -d /content/PyToJava
+cd /content/PyToJava
+pip install -q -r py2java/requirements.txt
+```
+
+GPU check:
+
+```python
+import torch
+print(torch.cuda.is_available())
+print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU")
+```
+
+Training command:
+
+```bash
+%%bash
+cd /content/PyToJava
+python3 -m py2java.main \
+  --mode train \
+  --data train.jsonl \
+  --val val.jsonl \
+  --save_dir checkpoints_colab
+```
+
+If you are using a T4 and run into memory pressure, reduce:
+
+- `--batch_size`
+- `--max_src_len`
+- `--max_tgt_len`
+
+## Troubleshooting
+
+### `ModuleNotFoundError: No module named 'py2java'`
+
+Run the command from the repository root:
+
+```bash
+cd /path/to/PyToJava
+python3 -m py2java.main --help
+```
+
+In Colab, put `cd` and `python3 -m ...` in the same `%%bash` cell.
+
+### Training Is Very Slow
+
+This is expected on CPU. Use a CUDA GPU for reasonable training speed.
+
+### CUDA Out of Memory
+
+Try smaller settings, for example:
+
+```bash
+python3 -m py2java.main \
+  --mode train \
+  --data train.jsonl \
+  --val val.jsonl \
+  --save_dir checkpoints_small_gpu \
+  --batch_size 2 \
+  --max_src_len 128 \
+  --max_tgt_len 192
+```
+
+### `javac` Compile Check Does Not Run
+
+Install a JDK and make sure `javac` is on your `PATH`.
+
+## Summary
+
+To reproduce results in this repository:
+
+1. install the Python dependencies
+2. prepare or reuse the JSONL dataset files
+3. train with `python3 -m py2java.main --mode train ...`
+4. evaluate with `python3 -m py2java.main --mode eval ...`
+5. use `model_best_bleu.pt` when you want the checkpoint chosen by validation BLEU
+
+This README is aligned with the current repository behavior, including data loading, tokenization, training, checkpoint selection, and evaluation.
